@@ -2,7 +2,7 @@
 
 _Bot_ de Twitter que postea cuando la [Municipalidad de Bahía Blanca](http://bahia.gob.ar) emite una orden de compra de pauta publicitaria
 
-![Tweet de ejemplo]()
+![Tweet de ejemplo](https://raw.githubusercontent.com/jazzido/pautabot/master/example_tweet.png)
 
 ## ¿Cómo funciona?
 
