@@ -6,6 +6,7 @@ verify_ssl = true
 [dev-packages]
 black = "*"
 mypy = "*"
+flake8 = "*"
 
 [packages]
 requests = "*"

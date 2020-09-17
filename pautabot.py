@@ -3,7 +3,7 @@ from datetime import datetime
 import logging
 import os
 import pickle
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 import sys
 
 import dotenv
@@ -19,11 +19,14 @@ KEYWORD_TO_CHECK = "publicidad"
 AD_PURCHASES_URL = f"https://gobiernoabierto.bahia.gob.ar/WS/2328/{CURRENT_YEAR}"
 ALL_PURCHASES_URL = f"https://gobiernoabierto.bahia.gob.ar/WS/2307/{CURRENT_YEAR}"
 DETAIL_PURCHASE_URL_TEMPLATE = (
+    "https://gobiernoabierto.bahia.gob.ar/WS/2312/{year}/{ordencompra}"
+)
+DETAIL_PURCHASE_PAGE_URL_TEMPLATE = (
     "https://www.bahia.gob.ar/compras/data/oc/{year}/{ordencompra}"
 )
 
 TWEET_TEMPLATE = """
-🤖 pautabot reportando nuevo 💸 gasto en pauta publicitaria:
+💸 Nuevo gasto de pauta oficial:
 
 📰  Proveedor: {proveedor}
 🏛  Dependencia: {dependencia}
@@ -102,7 +105,7 @@ def init_twitter_client() -> tweepy.API:
     return api
 
 
-def purchase_detail_page_url(purchase: Purchase) -> str:
+def purchase_detail_url(purchase: Purchase) -> str:
     return DETAIL_PURCHASE_URL_TEMPLATE.format(
         year=purchase.ejercicio, ordencompra=purchase.ordencompra
     )
@@ -115,7 +118,12 @@ def get_advertisement_totals_by_seller() -> Dict[str, float]:
 
 def get_all_purchases() -> List[Purchase]:
     resp = requests.get(ALL_PURCHASES_URL)
-    return Purchase.schema().load(resp.json(), many=True)
+    all_purchases = Purchase.schema().load(resp.json(), many=True)
+    return sorted(
+        all_purchases,
+        key=lambda p: datetime.strptime(p.fecha, "%d-%m-%Y"),
+        reverse=True,
+    )
 
 
 def diff_totals(old: Dict[str, float], new: Dict[str, float]) -> List[str]:
@@ -142,6 +150,11 @@ def diff_totals(old: Dict[str, float], new: Dict[str, float]) -> List[str]:
     return sellers_to_process
 
 
+def get_purchase_detail(url: str) -> List[dict]:
+    resp = requests.get(url)
+    return resp.json()
+
+
 def get_unprocessed_purchases_for_seller(
     all_purchases: List, processed_purchases: List[ProcessedPurchase], seller: str
 ) -> List[Purchase]:
@@ -159,25 +172,26 @@ def get_unprocessed_purchases_for_seller(
     return unprocessed_purchases
 
 
-def get_purchase_detail_html(url: str) -> str:
-    resp = requests.get(url)
-    return resp.text
-
-
 def tweet_new_purchase(purchase: Purchase, twitter_client: tweepy.API) -> tweepy.Status:
     tweet_body = TWEET_TEMPLATE.format(
         fecha=purchase.fecha,
-        proveedor=boldify(purchase.proveedor),
-        dependencia=boldify(purchase.dependencia),
-        importe=monodigits(str(purchase.importe)),
-        url=purchase_detail_page_url(purchase),
+        proveedor=purchase.proveedor,
+        dependencia=purchase.dependencia,
+        importe="{:,}".format(int(purchase.importe)).replace(",", "."),
+        url=DETAIL_PURCHASE_PAGE_URL_TEMPLATE.format(
+            year=purchase.ejercicio, ordencompra=purchase.ordencompra
+        ),
     )
 
-    status = twitter_client.update_status(
-        tweet_body
-    )
+    status = twitter_client.update_status(tweet_body)
 
     return status
+
+
+def _save_state(state: RunState):
+    logger.info("Saving new state")
+    with open(STATE_FILE, "wb") as sf:
+        pickle.dump(state, sf)
 
 
 def main():
@@ -186,54 +200,103 @@ def main():
         state: RunState = pickle.load(sf)
 
     logger.info(
-        "Read state. last_run: %s - len(totals_by_seller): %d - len(all_purchases): %d - len(processed_purchases): %d",
+        (
+            "Read state. last_run: %s - "
+            "len(totals_by_seller): %d - len(all_purchases): %d - "
+            "len(processed_purchases): %d"
+        ),
         state.last_run,
         len(state.totals_by_seller),
         len(state.all_purchases),
         len(state.processed_purchases),
     )
+    state.last_run = datetime.now()
 
     logger.info("Getting all purchases")
-    all_purchases = get_all_purchases()
+    state.all_purchases = get_all_purchases()
     logger.info("Getting ad purchases")
     ad_purchases_totals = get_advertisement_totals_by_seller()
 
     # Get sellers to find new purchases
     sellers_to_process = diff_totals(state.totals_by_seller, ad_purchases_totals)
+    state.totals_by_seller = ad_purchases_totals
+
     if len(sellers_to_process) == 0:
         logger.info("No changes since %s - Bye.", state.last_run)
+        _save_state(state)
+        sys.exit(0)
     else:
         twitter_client = init_twitter_client()
+        tweet_queue: List[Purchase] = []
 
     for seller in sellers_to_process:
         purchases_to_process = get_unprocessed_purchases_for_seller(
-            all_purchases, state.processed_purchases, seller
+            state.all_purchases, state.processed_purchases, seller
         )
         for p in purchases_to_process:
             logger.info("Processing purchase: %s", p)
-            logger.info("Getting detail page for %s/%s", p.ejercicio, p.ordencompra)
-            detail_page_html = get_purchase_detail_html(purchase_detail_page_url(p))
-
-            if KEYWORD_TO_CHECK not in detail_page_html.lower():
-                logger.info("Dropping %s - keyword not found")
+            logger.info("Getting detail for %s/%s", p.ejercicio, p.ordencompra)
+            try:
+                purchase_detail = get_purchase_detail(purchase_detail_url(p))
+            except Exception as e:
+                logger.warn("Error when getting detail of %s. Exception: %s", p, e)
                 state.processed_purchases.append(
                     ProcessedPurchase(
-                        **p.to_dict(), processed_at=datetime.now(), status="dropped", tweet_id=None
+                        **p.to_dict(),
+                        processed_at=datetime.now(),
+                        status="error",
+                        tweet_id=None,
                     )
                 )
                 continue
 
-            logger.info("Tweeting: %s", p)
-            status = tweet_new_purchase(p, twitter_client)
-            state.processed_purchases.append(
-                ProcessedPurchase(
-                    **p.to_dict(), processed_at=datetime.now(), status="processed", tweet_id=status.id_str
+            if not any(
+                map(
+                    lambda line: KEYWORD_TO_CHECK in line["detalle"].lower(),
+                    purchase_detail,
                 )
-            )
+            ):
+                logger.info("Dropping %s - keyword not found")
+                state.processed_purchases.append(
+                    ProcessedPurchase(
+                        **p.to_dict(),
+                        processed_at=datetime.now(),
+                        status="dropped",
+                        tweet_id=None,
+                    )
+                )
+                continue
+            logger.info("Will tweet: %s", p)
+            tweet_queue.append(p)
 
-    logger.info("Saving new state")
-    with open(STATE_FILE, "wb") as sf:
-        pickle.dump(state, sf)
+    for i, p in enumerate(
+        sorted(
+            tweet_queue,
+            key=lambda p: datetime.strptime(p.fecha, "%d-%m-%Y")
+        )
+    ):
+        tweet_id: str = ""
+        status: str = ""
+        logger.info("Tweeting: %s", p)
+        try:
+            status = tweet_new_purchase(p, twitter_client)
+            tweet_id = status.id
+            status = "processed"
+        except Exception as e:
+            logger.error("Could not tweet: %s", e)
+            tweet_id = ""
+            status = "error"
+
+        state.processed_purchases.append(
+            ProcessedPurchase(
+                **p.to_dict(),
+                processed_at=datetime.now(),
+                status=status,
+                tweet_id=tweet_id
+            )
+        )
+
+    _save_state(state)
 
 
 if __name__ == "__main__":
