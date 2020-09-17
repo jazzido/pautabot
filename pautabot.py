@@ -88,6 +88,8 @@ log_handler = logging.StreamHandler(sys.stdout)
 log_handler.setFormatter(
     logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 )
+if logger.hasHandlers():
+    logger.handlers.clear()
 logger.addHandler(log_handler)
 logger.setLevel(logging.DEBUG)
 
