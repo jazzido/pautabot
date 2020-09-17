@@ -13,6 +13,10 @@ Lamentablemente, el _web service_ mencionado publica el monto total de servicios
 Obtenemos las órdenes de compra para los proveedores que aumentaron el monto y hacemos un último control, que consiste en detectar si la palabra "publicidad" aparece en el detalle de la orden. Esto es necesario porque es posible que se emitan órdenes de compra a proveedores por conceptos distintos a publicidad.
 Podríamos evitarnos este malabar si las órdenes de compra incluyeran información sobre la clasificación presupuestaria del gasto. Previsiblemente, la municipalidad no incluyó esa información.
 
+## Cosas para mejorar
+
+El código está bastante complicado porque lo escribí medio de un tirón. Se merece unas reparaciones.
+
 ## Licencia
 
 El código de `pautabot` se publica bajo [Licencia MIT](https://es.wikipedia.org/wiki/Licencia_MIT). En pocas palabras, hacé lo que se te cante con el código. Si lo incluís en otro sistema, tenés que incluir el texto de la licencia de `pautabot`.
