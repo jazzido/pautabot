@@ -1,0 +1,5 @@
+.vscode
+.DS_Store
+.env
+pautabot.state
+__pycache__/*
