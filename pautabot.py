@@ -3,12 +3,15 @@ from datetime import datetime
 import logging
 import os
 import pickle
+import tempfile
 from typing import Dict, List, Optional, Set, Tuple
 import sys
 
+import click
 import dotenv
 from dataclasses_json import dataclass_json
 import requests
+import shutil
 import tweepy
 
 STATE_FILE = "pautabot.state"
@@ -28,10 +31,10 @@ DETAIL_PURCHASE_PAGE_URL_TEMPLATE = (
 TWEET_TEMPLATE = """
 💸 Nuevo gasto de pauta oficial:
 
-📰  Proveedor: {proveedor}
+📰 Proveedor: {proveedor}
 🏛  Dependencia: {dependencia}
 🗓  Fecha: {fecha}
-💵  Importe: $ {importe}
+💵 Importe: $ {importe}
 
 {url}
 """
@@ -107,6 +110,30 @@ def init_twitter_client() -> tweepy.API:
     return api
 
 
+def get_microlink_screenshot(url: str) -> str:
+    resp = requests.get(
+        "https://api.microlink.io/",
+        params={
+            "url": url,
+            "screenshot": "",
+            "element": "table",
+            "viewport.width": 1024,
+            "styles": "table { margin: 10px !important }"
+        },
+    )
+    j = resp.json()
+    # TODO handle exceptions
+    url = j["data"]["screenshot"]["url"]
+    resp = requests.get(url, stream=True)
+
+    fp, fname = tempfile.mkstemp(".png")
+    with open(fname, "wb") as f:
+        resp.raw.decode_content = True
+        shutil.copyfileobj(resp.raw, f)
+
+    return fname
+
+
 def purchase_detail_url(purchase: Purchase) -> str:
     return DETAIL_PURCHASE_URL_TEMPLATE.format(
         year=purchase.ejercicio, ordencompra=purchase.ordencompra
@@ -174,7 +201,7 @@ def get_unprocessed_purchases_for_seller(
     return unprocessed_purchases
 
 
-def tweet_new_purchase(purchase: Purchase, twitter_client: tweepy.API) -> tweepy.Status:
+def tweet_body_for_purchase(purchase: Purchase) -> str:
     tweet_body = TWEET_TEMPLATE.format(
         fecha=purchase.fecha,
         proveedor=purchase.proveedor,
@@ -185,12 +212,35 @@ def tweet_new_purchase(purchase: Purchase, twitter_client: tweepy.API) -> tweepy
         ),
     )
 
-    status = twitter_client.update_status(tweet_body)
+    return tweet_body
+
+
+def tweet_new_purchase(
+    purchase: Purchase, twitter_client: tweepy.API, with_image: bool = True
+) -> tweepy.Status:
+    status: tweepy.Status
+    tweet_body = tweet_body_for_purchase(purchase)
+
+    if with_image:
+        screenshot_path = get_microlink_screenshot(
+            DETAIL_PURCHASE_PAGE_URL_TEMPLATE.format(
+                year=purchase.ejercicio, ordencompra=purchase.ordencompra
+            )
+        )
+        status = twitter_client.update_with_media(screenshot_path, status=tweet_body)
+    else:
+        status = twitter_client.update_status(tweet_body)
 
     return status
 
 
-def _save_state(state: RunState):
+def load_state() -> RunState:
+    with open(STATE_FILE, "rb") as sf:
+        state: RunState = pickle.load(sf)
+    return state
+
+
+def save_state(state: RunState):
     logger.info("Saving new state")
     with open(STATE_FILE, "wb") as sf:
         pickle.dump(state, sf)
@@ -198,8 +248,7 @@ def _save_state(state: RunState):
 
 def main():
     logger.info(f"Running {__name__}")
-    with open(STATE_FILE, "rb") as sf:
-        state: RunState = pickle.load(sf)
+    state = load_state()
 
     logger.info(
         (
@@ -212,6 +261,7 @@ def main():
         len(state.all_purchases),
         len(state.processed_purchases),
     )
+    prev_run = state.last_run
     state.last_run = datetime.now()
 
     logger.info("Getting all purchases")
@@ -224,8 +274,8 @@ def main():
     state.totals_by_seller = ad_purchases_totals
 
     if len(sellers_to_process) == 0:
-        logger.info("No changes since %s - Bye.", state.last_run)
-        _save_state(state)
+        logger.info("No changes since %s - Bye.", prev_run)
+        save_state(state)
         sys.exit(0)
     else:
         twitter_client = init_twitter_client()
@@ -272,10 +322,7 @@ def main():
             tweet_queue.append(p)
 
     for i, p in enumerate(
-        sorted(
-            tweet_queue,
-            key=lambda p: datetime.strptime(p.fecha, "%d-%m-%Y")
-        )
+        sorted(tweet_queue, key=lambda p: datetime.strptime(p.fecha, "%d-%m-%Y"))
     ):
         tweet_id: str = ""
         status: str = ""
@@ -294,13 +341,65 @@ def main():
                 **p.to_dict(),
                 processed_at=datetime.now(),
                 status=status,
-                tweet_id=tweet_id
+                tweet_id=tweet_id,
             )
         )
 
-    _save_state(state)
+    save_state(state)
 
+
+@click.group()
+def commands():
+    ...
+
+
+@commands.command()
+def run_bot():
+    main()
+
+
+@commands.command()
+@click.argument("po_number", type=int)
+@click.argument("po_year", type=int)
+def tweet_purchase(po_number: int, po_year: int):
+    all_purchases = get_all_purchases()
+    ps = [
+        p
+        for p in all_purchases
+        if p.ordencompra == po_number and p.ejercicio == po_year
+    ]
+    if len(ps) != 1:
+        click.echo(f"PO {po_number}/{po_year} not found", err=True)
+        sys.exit(1)
+
+    purchase = ps[0]
+    tweet_body = tweet_body_for_purchase(purchase)
+    api = init_twitter_client()
+    screenshot_path = get_microlink_screenshot(
+        DETAIL_PURCHASE_PAGE_URL_TEMPLATE.format(
+            year=purchase.ejercicio, ordencompra=purchase.ordencompra
+        )
+    )
+
+    api.update_with_media(screenshot_path, status=tweet_body)
+
+
+@commands.command()
+def check_if_new():
+    state = load_state()
+    ad_purchases_totals = get_advertisement_totals_by_seller()
+    sellers_to_process = diff_totals(state.totals_by_seller, ad_purchases_totals)
+
+    if len(sellers_to_process) > 0:
+        click.echo(f"New POs for: {sellers_to_process}")
+    else:
+        click.echo(f"No new POs")
+
+
+commands.add_command(run_bot)
+commands.add_command(tweet_purchase)
+commands.add_command(check_if_new)
 
 if __name__ == "__main__":
     dotenv.load_dotenv()
-    main()
+    commands()

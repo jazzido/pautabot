@@ -13,6 +13,7 @@ requests = "*"
 tweepy = "*"
 dataclasses-json = "*"
 python-dotenv = "*"
+click = "*"
 
 [requires]
 python_version = "3.7"
