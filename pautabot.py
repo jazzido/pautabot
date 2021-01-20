@@ -17,6 +17,7 @@ import tweepy
 STATE_FILE = "pautabot.state"
 BIGNUM = 9e15
 CURRENT_YEAR = datetime.now().year
+
 KEYWORD_TO_CHECK = "publicidad"
 
 AD_PURCHASES_URL = f"https://gobiernoabierto.bahia.gob.ar/WS/2328/{CURRENT_YEAR}"
@@ -32,8 +33,8 @@ TWEET_TEMPLATE = """
 💸 Nuevo gasto de pauta oficial:
 
 📰 Proveedor: {proveedor}
-🏛  Dependencia: {dependencia}
-🗓  Fecha: {fecha}
+🏛 Dependencia: {dependencia}
+🗓 Fecha: {fecha}
 💵 Importe: $ {importe}
 
 {url}
@@ -142,7 +143,9 @@ def purchase_detail_url(purchase: Purchase) -> str:
 
 def get_advertisement_totals_by_seller() -> Dict[str, float]:
     resp = requests.get(AD_PURCHASES_URL)
-    return {row["proveedor"]: float(row["monto"]) for row in resp.json()}
+    logger.info("Got totals by seller: %s", resp.text)
+    json_resp = resp.json()
+    return {row["proveedor"]: float(row["monto"]) for row in json_resp}
 
 
 def get_all_purchases() -> List[Purchase]:
@@ -277,9 +280,10 @@ def main():
         logger.info("No changes since %s - Bye.", prev_run)
         save_state(state)
         sys.exit(0)
-    else:
-        twitter_client = init_twitter_client()
-        tweet_queue: List[Purchase] = []
+    
+
+    twitter_client = init_twitter_client()
+    tweet_queue: List[Purchase] = []
 
     for seller in sellers_to_process:
         purchases_to_process = get_unprocessed_purchases_for_seller(
@@ -393,7 +397,7 @@ def check_if_new():
     if len(sellers_to_process) > 0:
         click.echo(f"New POs for: {sellers_to_process}")
     else:
-        click.echo(f"No new POs")
+        click.echo("No new POs")
 
 
 commands.add_command(run_bot)
