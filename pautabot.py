@@ -123,18 +123,24 @@ def get_microlink_screenshot(url: str) -> str:
         },
     )
     j = resp.json()
-    # TODO handle exceptions
-    url = j["data"]["screenshot"]["url"]
-    resp = requests.get(url, stream=True)
+    if j.get("status") == "fail" and j.get("code") == "ECNRCY":
+        # concurrency error, try again
+        # TODO: set max number of retries
+        logger.info("Microlink throttled. Retrying in 2 secs...")
+        time.sleep(2)
+        return get_microlink_screenshot(url)
+    else:
+        url = j["data"]["screenshot"]["url"]
+        resp = requests.get(url, stream=True)
 
-    fp, fname = tempfile.mkstemp(".png")
-    with open(fname, "wb") as f:
-        resp.raw.decode_content = True
-        shutil.copyfileobj(resp.raw, f)
+        fp, fname = tempfile.mkstemp(".png")
+        with open(fname, "wb") as f:
+            resp.raw.decode_content = True
+            shutil.copyfileobj(resp.raw, f)
 
-    return fname
+        return fname
 
-
+    
 def purchase_detail_url(purchase: Purchase) -> str:
     return DETAIL_PURCHASE_URL_TEMPLATE.format(
         year=purchase.ejercicio, ordencompra=purchase.ordencompra
